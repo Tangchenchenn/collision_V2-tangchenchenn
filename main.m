@@ -86,12 +86,15 @@ dof_with_time = zeros(softRobot.n_DOF+1, Nsteps);
 dof_with_time(1,:) = time_arr;
 
 % 力和扭矩记录初始化
+% ... (约100行处) ...
+% 力和扭矩记录初始化
 F_history = struct('stretch', zeros(Nsteps,1), 'bend', zeros(Nsteps,1), ...
                    'twist', zeros(Nsteps,1), 'cent', zeros(Nsteps,1), ...
                    'coriolis', zeros(Nsteps,1), 'contact', zeros(Nsteps,1), ...
+                   'joint_force', zeros(Nsteps,1), ... % 【新增】：记录连接处合力
                    'motor_torque', zeros(Nsteps,1), ...
                    'motor_omega', zeros(Nsteps,1), ...
-                   'motor_power', zeros(Nsteps,1)); 
+                   'motor_power', zeros(Nsteps,1));
 
 fprintf('开始物理仿真 (共 %d 步)...\n', Nsteps);
 
@@ -133,7 +136,20 @@ imc.theta_accumulated = imc.theta_accumulated + current_omega_mag * sim_params.d
         timeStepper(softRobot, stretch_springs, bend_twist_springs, hinge_springs, ...
         triangle_springs, tau_0, environment, imc, sim_params, ctime);
 
-    % --- [修正] 移除了原有的延时触发屏蔽逻辑，确保碰撞力实时反馈 ---
+   % --- 【新增】：记录轮毂与绳连接点处的力 ---
+    % 通常连接点是 rod_shell_joint_edges 涉及的节点
+    if isfield(force_now, 'internal')
+        % 提取所有节点的内力向量 [3 x n_nodes]
+        internal_forces_vec = reshape(force_now.internal(1:3*softRobot.n_nodes), 3, []);
+        
+        % 寻找连接处节点的索引（通常是 rod_edges 的第一个节点或 joint_edges 涉及的节点）
+        % 这里假设连接点在 rod_shell_joint_edges 的节点上
+        joint_node_indices = unique(edges(rod_shell_joint_edges, :));
+        
+        % 计算连接点处的合力大小 (取涉及节点力模值的平均或总和)
+        joint_force_mag = sum(vecnorm(internal_forces_vec(:, joint_node_indices)));
+        F_history.joint_force(timeStep) = joint_force_mag;
+    end
 
     % 3. 追踪峰值接触力与碰撞位置
     is_colliding_now = imc.peak_force > previous_peak_forces;
@@ -219,130 +235,111 @@ fprintf('马达输出峰值扭矩: %.2f N·m\n', peak_torque);
 fprintf('马达瞬态峰值功率: %.2f W\n', peak_power);
 fprintf('==========================\n');
 
-%% 3. 动画生成 (Post-Processing) 
+% %% 3. 动画生成 (Post-Processing) 
+% %% ==========================================
+% fprintf('仿真完成，开始生成动画视频...\n');
+% videoFileName = 'Deicing_Spin_Fixed.mp4';
+% v = VideoWriter(videoFileName, 'MPEG-4'); 
+% v.FrameRate = 30; 
+% open(v);
+% 
+% h_fig = figure('Renderer', 'opengl', 'Color', 'w'); 
+% set(h_fig, 'Position', [100, 100, 1024, 768]); 
+% 
+% plot_limit = 0.3; 
+% x_lims = [-plot_limit, plot_limit];
+% y_lims = [-plot_limit, plot_limit];
+% z_lims = [-0.1, 0.4]; 
+% 
+% targetH = [];  
+% targetW = [];  
+% 
+% for k = sim_params.logStep : sim_params.logStep : Nsteps
+%     t_frame = dof_with_time(1, k);
+%     q_frame = dof_with_time(2:end, k);
+% 
+%     if norm(q_frame) == 0, continue; end
+% 
+%     softRobot.q = q_frame; 
+%     figure(h_fig); 
+% 
+%     if t_frame < sim_params.ramp_time
+%         imc.theta_accumulated = 0.5 * (sim_params.omega_target / sim_params.ramp_time) * (t_frame^2);
+%     else
+%         theta_ramp = 0.5 * sim_params.omega_target * sim_params.ramp_time;
+%         imc.theta_accumulated = theta_ramp + sim_params.omega_target * (t_frame - sim_params.ramp_time);
+%     end
+% 
+%     imc.is_broken = (t_frame >= break_times);
+%     try
+%         plot_MultiRod(softRobot, t_frame, sim_params, environment, imc);
+%     catch ME
+%         warning('绘图出错: %s', ME.message);
+%         clf; plot_MultiRod(softRobot, t_frame, sim_params, environment, imc);
+%     end
+% 
+%     xlim(x_lims); ylim(y_lims); zlim(z_lims);     
+%     axis equal; view(3); grid on;
+% 
+%     ax = gca;
+%     ax.XLimMode = 'manual'; ax.YLimMode = 'manual'; ax.ZLimMode = 'manual';
+%     ax.DataAspectRatioMode = 'manual'; ax.PlotBoxAspectRatioMode = 'manual';
+%     ax.CameraPositionMode = 'manual'; ax.CameraTargetMode = 'manual'; ax.CameraViewAngleMode = 'manual';
+% 
+%     current_force = 0;
+%     if k <= length(F_history.contact)
+%         current_force = F_history.contact(k);
+%     end
+%     title(sprintf('Time: %.3fs | Force: %.1f N', t_frame, current_force));
+% 
+%     frame = getframe(h_fig); 
+%     if isempty(targetH)
+%         targetH = size(frame.cdata, 1);
+%         targetW = size(frame.cdata, 2);
+%     end
+%     if ~isequal(size(frame.cdata, 1), targetH) || ~isequal(size(frame.cdata, 2), targetW)
+%         frame.cdata = imresize(frame.cdata, [targetH, targetW]);
+%     end
+%     writeVideo(v, frame);
+% end
+% 
+% close(v);
+% fprintf('动画已保存: %s\n', videoFileName);
+
 %% ==========================================
-fprintf('仿真完成，开始生成动画视频...\n');
-videoFileName = 'Deicing_Spin_Fixed.mp4';
-v = VideoWriter(videoFileName, 'MPEG-4'); 
-v.FrameRate = 30; 
-open(v);
-
-h_fig = figure('Renderer', 'opengl', 'Color', 'w'); 
-set(h_fig, 'Position', [100, 100, 1024, 768]); 
-
-plot_limit = 0.3; 
-x_lims = [-plot_limit, plot_limit];
-y_lims = [-plot_limit, plot_limit];
-z_lims = [-0.1, 0.4]; 
-
-targetH = [];  
-targetW = [];  
-
-for k = sim_params.logStep : sim_params.logStep : Nsteps
-    t_frame = dof_with_time(1, k);
-    q_frame = dof_with_time(2:end, k);
-
-    if norm(q_frame) == 0, continue; end
-
-    softRobot.q = q_frame; 
-    figure(h_fig); 
-
-    if t_frame < sim_params.ramp_time
-        imc.theta_accumulated = 0.5 * (sim_params.omega_target / sim_params.ramp_time) * (t_frame^2);
-    else
-        theta_ramp = 0.5 * sim_params.omega_target * sim_params.ramp_time;
-        imc.theta_accumulated = theta_ramp + sim_params.omega_target * (t_frame - sim_params.ramp_time);
-    end
-
-    imc.is_broken = (t_frame >= break_times);
-    try
-        plot_MultiRod(softRobot, t_frame, sim_params, environment, imc);
-    catch ME
-        warning('绘图出错: %s', ME.message);
-        clf; plot_MultiRod(softRobot, t_frame, sim_params, environment, imc);
-    end
-
-    xlim(x_lims); ylim(y_lims); zlim(z_lims);     
-    axis equal; view(3); grid on;
-
-    ax = gca;
-    ax.XLimMode = 'manual'; ax.YLimMode = 'manual'; ax.ZLimMode = 'manual';
-    ax.DataAspectRatioMode = 'manual'; ax.PlotBoxAspectRatioMode = 'manual';
-    ax.CameraPositionMode = 'manual'; ax.CameraTargetMode = 'manual'; ax.CameraViewAngleMode = 'manual';
-
-    current_force = 0;
-    if k <= length(F_history.contact)
-        current_force = F_history.contact(k);
-    end
-    title(sprintf('Time: %.3fs | Force: %.1f N', t_frame, current_force));
-
-    frame = getframe(h_fig); 
-    if isempty(targetH)
-        targetH = size(frame.cdata, 1);
-        targetW = size(frame.cdata, 2);
-    end
-    if ~isequal(size(frame.cdata, 1), targetH) || ~isequal(size(frame.cdata, 2), targetW)
-        frame.cdata = imresize(frame.cdata, [targetH, targetW]);
-    end
-    writeVideo(v, frame);
-end
-
-close(v);
-fprintf('动画已保存: %s\n', videoFileName);
-
+%% 4. 绘制综合评估曲线 (含连接点力)
 %% ==========================================
-%% 4. 绘制马达性能综合评估曲线
-%% ==========================================
-figure('Name', '气动马达除冰性能评估', 'Position', [150, 50, 900, 1000]); 
-
+figure('Name', '综合动力学评估', 'Position', [150, 50, 1000, 1200]); 
 cn_font = 'Microsoft YaHei'; 
 
-% 子图1：冰层接触力与断裂点标记
-subplot(4,1,1);
-plot(time_arr, F_history.contact, 'r-', 'LineWidth', 1.5); 
-hold on;
+% 子图1：接触力
+subplot(5,1,1);
+plot(time_arr, F_history.contact, 'r-', 'LineWidth', 1.5); hold on;
 valid_breaks = isfinite(break_times);
 scatter(break_times(valid_breaks), imc.peak_force(valid_breaks), 60, 'k', 'p', 'filled');
-title('瞬态接触力与冰柱断裂', 'FontName', cn_font); 
-xlabel('时间 [s]', 'FontName', cn_font); ylabel('力 [N]', 'FontName', cn_font);
-legend('接触力', '冰柱断裂', 'Location', 'best', 'FontName', cn_font);
-grid on;
-set(gca, 'FontName', cn_font); 
+title('接触力与断裂事件', 'FontName', cn_font); ylabel('力 [N]'); grid on;
 
-% 子图2：转速曲线 (马达启动响应)
-subplot(4,1,2);
+% 子图2：连接点受力 (Hub-Cable Joint Force)
+subplot(5,1,2);
+plot(time_arr, F_history.joint_force, 'Color', [0.85, 0.33, 0.1], 'LineWidth', 1.5);
+title('轮毂-绳索连接处内力 (载荷校核)', 'FontName', cn_font);
+ylabel('内力 [N]'); xlabel('时间 [s]'); grid on;
+
+% 子图3：马达转速
+subplot(5,1,3);
 plot(time_arr, F_history.motor_omega, 'b-', 'LineWidth', 1.5);
-hold on;
-yline(sim_params.omega_target, 'k--', '目标转速', 'FontName', cn_font);
-title('马达转速响应 (\omega)', 'FontName', cn_font); 
-xlabel('时间 [s]', 'FontName', cn_font); ylabel('转速 [rad/s]', 'FontName', cn_font);
-grid on;
-set(gca, 'FontName', cn_font);
+yline(sim_params.omega_target, 'k--');
+title('马达转速响应', 'FontName', cn_font); ylabel('rad/s'); grid on;
 
-% 子图3：驱动扭矩曲线 (冲击载荷校核)
-subplot(4,1,3);
-plot(time_arr, F_history.motor_torque, 'm-', 'LineWidth', 1.5); 
-hold on;
-[~, idx_t] = max(abs(F_history.motor_torque));
-max_torque = F_history.motor_torque(idx_t);
-plot(time_arr(idx_t), max_torque, 'mo', 'MarkerSize', 8, 'MarkerFaceColor', 'm');
-title('马达驱动扭矩', 'FontName', cn_font); 
-xlabel('时间 [s]', 'FontName', cn_font); ylabel('扭矩 [N·m]', 'FontName', cn_font);
-legend('输出扭矩', sprintf('峰值: %.2f N·m', max_torque), 'Location', 'best', 'FontName', cn_font);
-grid on;
-set(gca, 'FontName', cn_font);
+% 子图4：驱动扭矩
+subplot(5,1,4);
+plot(time_arr, F_history.motor_torque, 'm-', 'LineWidth', 1.5);
+title('马达输出扭矩', 'FontName', cn_font); ylabel('N·m'); grid on;
 
-% 子图4：动态功率消耗 (供气选型依据)
-subplot(4,1,4);
+% 子图5：输出功率
+subplot(5,1,5);
 plot(time_arr, F_history.motor_power, 'g-', 'LineWidth', 1.5);
-hold on;
-[~, idx_p] = max(abs(F_history.motor_power));
-max_power = F_history.motor_power(idx_p);
-plot(time_arr(idx_p), max_power, 'go', 'MarkerSize', 8, 'MarkerFaceColor', 'g');
-title(sprintf('马达输出功率 (总消耗能量: %.2f J)', energy_consumption), 'FontName', cn_font); 
-xlabel('时间 [s]', 'FontName', cn_font); ylabel('功率 [W]', 'FontName', cn_font);
-legend('输出功率', sprintf('峰值: %.2f W', max_power), 'Location', 'best', 'FontName', cn_font);
-grid on;
-set(gca, 'FontName', cn_font);
+title(sprintf('马达瞬态功率 (总能耗: %.2f J)', energy_consumption), 'FontName', cn_font);
+ylabel('功率 [W]'); xlabel('时间 [s]'); grid on;
 
-sgtitle('气动马达性能与除冰动力学评估', 'FontWeight', 'bold', 'FontSize', 14, 'FontName', cn_font);
+sgtitle('轮毂-绳索耦合动力学与马达性能评估', 'FontSize', 14, 'FontName', cn_font);
